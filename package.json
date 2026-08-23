@@ -1,0 +1,53 @@
+{
+  "name": "@voxelkloud/format-las",
+  "version": "0.1.0",
+  "description": "The LAS point record, shared by every voxelkloud driver that stores one: dimension layout for point formats 0-10, the Extra Bytes VLR, and the decode into neutral typed arrays.",
+  "license": "MIT",
+  "keywords": [
+    "point-cloud",
+    "lidar",
+    "las",
+    "laz",
+    "copc",
+    "ept"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/voxelkloud/format-las.git"
+  },
+  "homepage": "https://github.com/voxelkloud/voxelkloud",
+  "bugs": {
+    "url": "https://github.com/voxelkloud/voxelkloud/issues"
+  },
+  "sideEffects": false,
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@voxelkloud/core": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "tsup": "^8.3.5",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.4"
+  }
+}
