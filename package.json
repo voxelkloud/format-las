@@ -1,6 +1,6 @@
 {
   "name": "@voxelkloud/format-las",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "The LAS point record, shared by every voxelkloud driver that stores one: dimension layout for point formats 0-10, the Extra Bytes VLR, and the decode into neutral typed arrays.",
   "license": "MIT",
   "keywords": [
