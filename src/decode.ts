@@ -133,7 +133,29 @@ export interface LasDecodePlan {
   readonly fields: readonly PlannedField[];
   readonly position: PlannedField;
   readonly color:
-    | { readonly field: PlannedField; readonly shift: 0 | 8; readonly declaredMax: number }
+    | {
+        readonly field: PlannedField;
+        /**
+         * Mutable, and settled once from real data — see the decode loop.
+         * The DECLARED max cannot decide this alone: for point formats 7 and 8
+         * it is synthesised as 65535 whether or not the file ever stores a
+         * value above 255.
+         */
+        shift: 0 | 8;
+        /**
+         * Multiplier applied when narrowing to bytes, settled with `shift`.
+         *
+         * A fixed `>>> 8` assumes the file spans the full 16-bit range. Many
+         * do not — a survey that peaks near 8000 comes out eight times too
+         * dark under a shift, and black under nothing. Scaling by the widest
+         * value actually present is what the CPU thumbnail renderer already
+         * does, and the two now agree.
+         */
+        scale: number;
+        /** Set once the narrowing has been confirmed against decoded values. */
+        shiftResolved: boolean;
+        readonly declaredMax: number;
+      }
     | undefined;
   readonly warnings: readonly LasWarning[];
   /** Output bytes per point, across every selected field. */
@@ -239,6 +261,10 @@ export function createLasDecodePlan(
             : declaredMax > 255
               ? 8
               : 0,
+        scale: 1,
+        // Nothing to confirm when no narrowing was chosen.
+        shiftResolved:
+          colorFormat === "native" || attribute.elementSize !== 2 || declaredMax <= 255,
         declaredMax,
       };
     }
@@ -450,12 +476,47 @@ export function decodeLasRecords(
 
   let colors: DecodedColors | undefined;
   if (plan.color !== undefined) {
-    const { field, shift, declaredMax } = plan.color;
+    const color = plan.color;
+    const { field, declaredMax } = color;
     const wide = field.out === "u16";
     const array = wide ? new Uint16Array(4 * count) : new Uint8Array(4 * count);
     const maxValue = wide ? 65535 : 255;
     const at = field.access.kind === "scalar" ? field.access.at : 0;
     const elementSize = field.attribute.elementSize;
+
+    // The DECLARED range is not evidence. Point formats 7 and 8 declare 65535
+    // whether or not the file ever writes a value above 255, and plenty of
+    // producers put 0..255 in those fields — so a blind `>>> 8` renders those
+    // clouds solid black, and a file that merely peaks below 65535 comes out
+    // far too dark. This scans one node for the widest value actually present,
+    // then settles the narrowing from it.
+    //
+    // Settled ONCE for the whole cloud, never per value: a genuinely 16-bit
+    // channel that happens to sit below 255 keeps its hue, and two nodes can
+    // never disagree about the same file.
+    if (!color.shiftResolved && elementSize === 2 && !wide) {
+      let widest = 0;
+      for (let i = 0; i < count; i++) {
+        const base = i * plan.stride + at;
+        for (let c = 0; c < 3; c++) {
+          const raw = view.getUint16(base + c * 2, true);
+          if (raw > widest) widest = raw;
+        }
+      }
+      // A node too small to be representative decides nothing; the next one
+      // gets the same chance.
+      if (widest > 255 || count >= 1024) {
+        color.shift = widest > 255 ? 8 : 0;
+        color.scale = widest > 255 ? 255 / widest : 1;
+        color.shiftResolved = true;
+      } else {
+        color.shift = 0;
+        color.scale = 1;
+      }
+    }
+
+    const shift = color.shift;
+    const scale = color.scale;
     for (let i = 0; i < count; i++) {
       const base = i * plan.stride + at;
       for (let c = 0; c < 3; c++) {
@@ -463,7 +524,16 @@ export function decodeLasRecords(
           elementSize === 2
             ? view.getUint16(base + c * 2, true)
             : view.getUint8(base + c);
-        array[4 * i + c] = shift === 8 ? raw >>> 8 : raw;
+        // Clamped on BOTH branches, and the unscaled one is the reason: the
+        // narrowing is settled once for the cloud, so a node that arrives later
+        // with a value above the settled range gets written into a Uint8Array
+        // that wraps it — 60000 lands on 96, a mid grey, where the point is
+        // meant to be the brightest thing in the file. Saturating is wrong by a
+        // little; wrapping is wrong by any amount and looks deliberate.
+        array[4 * i + c] =
+          scale === 1
+            ? Math.min(maxValue, raw)
+            : Math.min(maxValue, Math.round(raw * scale));
       }
       // Alpha is filled rather than left at zero: LAS has no alpha channel and
       // a shader that binds vec4 would render the whole cloud transparent.

@@ -488,3 +488,124 @@ describe("decodeLasRecords", () => {
     );
   });
 });
+
+describe("decodeLasRecords: narrowing 16-bit colour to bytes", () => {
+  // Point formats 7 and 8 DECLARE 0..65535 for colour because the format says
+  // so, not because the file was read — `lasDimensions` synthesises that range
+  // from the format number. So the declared max is not evidence of anything,
+  // and a blind `>>> 8` renders every 8-bit-in-a-16-bit-field producer solid
+  // black while merely dimming everything that peaks below 65535. The decoder
+  // scans instead, and settles the narrowing once for the whole cloud.
+  const RGB_AT = 30;
+  const SIZE = 36;
+
+  const OPTIONS = {
+    scale: [0.01, 0.01, 0.01],
+    offset: [0, 0, 0],
+    cloudOrigin: [0, 0, 0],
+  } as const;
+
+  /** A format 7 node carrying nothing but the colours under test. */
+  function node(colors: readonly (readonly [number, number, number])[]): Uint8Array {
+    const bytes = new Uint8Array(SIZE * colors.length);
+    const view = new DataView(bytes.buffer);
+    colors.forEach((rgb, i) => {
+      for (let c = 0; c < 3; c++) {
+        view.setUint16(i * SIZE + RGB_AT + c * 2, rgb[c]!, true);
+      }
+    });
+    return bytes;
+  }
+
+  function planFor(options: Record<string, unknown> = {}) {
+    return createLasDecodePlan(
+      lasLayout({ format: 7, pointSize: SIZE, bounds: box() }),
+      { ...OPTIONS, ...options } as Parameters<typeof createLasDecodePlan>[1],
+    );
+  }
+
+  function decode(
+    plan: ReturnType<typeof planFor>,
+    colors: readonly (readonly [number, number, number])[],
+  ) {
+    return decodeLasRecords(
+      plan,
+      { ...NODE, numPoints: colors.length },
+      node(colors),
+    );
+  }
+
+  /** The red channel of each point, which is all these cases vary. */
+  const reds = (data: ReturnType<typeof decode>, n: number): number[] =>
+    Array.from({ length: n }, (_, i) => data.colors!.array[4 * i]!);
+
+  it("passes 8-bit values through a field that declares 16", () => {
+    // The case that rendered black: a producer writing 0..255 into the u16
+    // colour of a format 7 file. Nothing here may be shifted.
+    const data = decode(planFor(), [
+      [10, 10, 10],
+      [200, 200, 200],
+      [255, 255, 255],
+    ]);
+    expect(reds(data, 3)).toEqual([10, 200, 255]);
+  });
+
+  it("scales by the widest value present, not by the declared one", () => {
+    // A survey peaking at 8000. `>>> 8` would put its brightest point at 31 —
+    // eight times too dark — because the shift assumes a full 16-bit span.
+    const data = decode(planFor(), [
+      [8000, 8000, 8000],
+      [4000, 4000, 4000],
+      [0, 0, 0],
+    ]);
+    expect(reds(data, 3)).toEqual([255, 128, 0]);
+  });
+
+  it("agrees with a plain shift when the file really does span 16 bits", () => {
+    // The case the shift was written for must not regress: widest 65535 makes
+    // the scale 255/65535, which is `>>> 8` to within the rounding.
+    const data = decode(planFor(), [
+      [65535, 65535, 65535],
+      [32768, 32768, 32768],
+      [256, 256, 256],
+    ]);
+    expect(reds(data, 3)).toEqual([255, 128, 1]);
+  });
+
+  it("settles once for the cloud, so two nodes cannot disagree", () => {
+    // Per-node narrowing would make a dim tile brighter than a bright one and
+    // put a visible seam down the middle of a survey. The second node here
+    // holds only dark points and must stay dark on the first node's scale.
+    const plan = planFor();
+    expect(reds(decode(plan, [[8000, 8000, 8000]]), 1)).toEqual([255]);
+    expect(reds(decode(plan, [[100, 100, 100]]), 1)).toEqual([3]);
+  });
+
+  it("lets a node too small to be representative decide nothing", () => {
+    // Three dark points are not proof the cloud is 8-bit, so the decision stays
+    // open and the next node still gets to make it.
+    const plan = planFor();
+    expect(reds(decode(plan, [[10, 10, 10]]), 1)).toEqual([10]);
+    expect(reds(decode(plan, [[60000, 60000, 60000]]), 1)).toEqual([255]);
+  });
+
+  it("closes the decision on a node large enough to be evidence", () => {
+    // 1024 points that never break 255 IS evidence, and the cloud is 8-bit.
+    // Without this the scan re-runs on every node for the whole load.
+    const plan = planFor();
+    const many = Array.from({ length: 1024 }, () => [12, 12, 12] as const);
+    expect(reds(decode(plan, many), 1)).toEqual([12]);
+    // A later point above the settled range saturates. It must NOT wrap: a
+    // Uint8Array takes 60000 to 96 on its own, which is a mid grey where the
+    // brightest point in the file should be.
+    expect(reds(decode(plan, [[60000, 60000, 60000]]), 1)).toEqual([255]);
+  });
+
+  it("leaves native colour alone — there is nothing to narrow", () => {
+    const data = decode(planFor({ colorFormat: "native" }), [
+      [8000, 8000, 8000],
+      [65535, 65535, 65535],
+    ]);
+    expect(reds(data, 2)).toEqual([8000, 65535]);
+  });
+});
